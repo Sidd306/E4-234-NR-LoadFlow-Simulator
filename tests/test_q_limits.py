@@ -1,3 +1,4 @@
+
 import sys
 sys.path.insert(0, "src")
 
@@ -5,60 +6,62 @@ from loadflow.models import Bus, Generator, Network
 from loadflow.q_limits import check_q_limits
 
 
-network = Network(base_mva=100)
+def create_test_network():
 
-network.add_bus(Bus(1, "Slack"))
-network.add_bus(Bus(2, "PV", 1.04))
+    network = Network(base_mva=100)
 
-network.add_generator(Generator(
-    bus_id=1
-))
+    network.add_bus(Bus(1, "Slack"))
+    network.add_bus(Bus(2, "PV", 1.04))
 
-network.add_generator(Generator(
-    bus_id=2,
-    p_mw=50,
-    q_min_mvar=-40,
-    q_max_mvar=40
-))
+    network.add_generator(Generator(bus_id=1))
 
-# Required Q at bus 2 = 60 MVAr
-Q_calc = [0.0, 0.60]
+    generator = Generator(
+        bus_id=2,
+        p_mw=50,
+        q_min_mvar=-40,
+        q_max_mvar=40
+    )
 
-events = check_q_limits(network, Q_calc)
+    network.add_generator(generator)
 
-print("Events:", events)
-print("Bus 2 type:", network.buses[1].bus_type)
-print("Generator Q:", network.generators[1].q_mvar)
+    return network, generator
 
-assert network.buses[1].bus_type == "PQ"
-assert network.generators[1].q_mvar == 40
 
-print("\nQ-limit test passed!")
+def test_qmax_violation():
 
-# Test Qmin violation
-network2 = Network(base_mva=100)
+    network, generator = create_test_network()
 
-network2.add_bus(Bus(1, "Slack"))
-network2.add_bus(Bus(2, "PV", 1.04))
+    # Required Q at bus 2 = 60 MVAr
+    Q_calc = [0.0, 0.60]
 
-network2.add_generator(Generator(bus_id=1))
-network2.add_generator(Generator(
-    bus_id=2,
-    p_mw=50,
-    q_min_mvar=-40,
-    q_max_mvar=40
-))
+    events = check_q_limits(network, Q_calc)
 
-# Required Q = -60 MVAr
-Q_calc2 = [0.0, -0.60]
+    assert network.buses[1].bus_type == "PQ"
+    assert generator.q_mvar == 40
 
-events2 = check_q_limits(network2, Q_calc2)
+    assert len(events) == 1
+    assert events[0]["limit"] == "Qmax"
+    assert events[0]["q_required"] == 60
+    assert events[0]["q_limit"] == 40
 
-print("\nQmin Events:", events2)
-print("Bus 2 type:", network2.buses[1].bus_type)
-print("Generator Q:", network2.generators[1].q_mvar)
+    print("\nQmax test passed!")
 
-assert network2.buses[1].bus_type == "PQ"
-assert network2.generators[1].q_mvar == -40
 
-print("\nQmin test passed!")
+def test_qmin_violation():
+
+    network, generator = create_test_network()
+
+    # Required Q at bus 2 = -60 MVAr
+    Q_calc = [0.0, -0.60]
+
+    events = check_q_limits(network, Q_calc)
+
+    assert network.buses[1].bus_type == "PQ"
+    assert generator.q_mvar == -40
+
+    assert len(events) == 1
+    assert events[0]["limit"] == "Qmin"
+    assert events[0]["q_required"] == -60
+    assert events[0]["q_limit"] == -40
+
+    print("\nQmin test passed!")
