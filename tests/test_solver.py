@@ -47,6 +47,14 @@ print(results["Q_calc"])
 print("\nFinal Maximum Mismatch:")
 print(np.max(np.abs(results["mismatch"])))
 
+print("\nConvergence History:")
+
+for entry in results["history"]:
+    print(
+        f"Iteration {entry['iteration']}: "
+        f"{entry['max_mismatch']:.10e}"
+    )
+    
 assert results["converged"], "Newton-Raphson did not converge!"
 
 print("\nNewton-Raphson test passed!")

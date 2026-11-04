@@ -25,7 +25,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
     voltage_angle = np.array(
         [bus.voltage_angle_rad for bus in network.buses]
     )
-
+    history = []        
     # Newton-Raphson iteration
     for iteration in range(max_iterations + 1):
 
@@ -41,6 +41,11 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
 
         # Check convergence
         error = np.max(np.abs(mismatch)) if mismatch.size else 0.0
+        
+        history.append({
+        "iteration": iteration,
+        "max_mismatch": error
+        })
 
         if error <= tolerance:
             return {
@@ -50,7 +55,8 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
                 "voltage_angle": voltage_angle,
                 "P_calc": P_calc,
                 "Q_calc": Q_calc,
-                "mismatch": mismatch
+                "mismatch": mismatch,
+                "history": history
             }
 
         if iteration == max_iterations:
@@ -80,4 +86,3 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
         "Q_calc": Q_calc,
         "mismatch": mismatch
     }
-    
