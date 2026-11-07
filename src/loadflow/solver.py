@@ -1,6 +1,7 @@
 
 import numpy as np
 import copy
+from time import perf_counter
 
 from loadflow.ybus import build_ybus
 from loadflow.power import calculate_power
@@ -89,7 +90,8 @@ def calculate_system_summary(network, voltage_mag, generator_outputs, branch_flo
 
 
 def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
-                         enforce_q_limits=True, max_q_switch_stages=None):
+                         enforce_q_limits=True, max_q_switch_stages=None,
+                         initial_state=None):
 
     if not np.isfinite(tolerance) or tolerance <= 0:
         raise ValueError("Tolerance must be finite and positive")
@@ -100,6 +102,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
     if max_q_switch_stages is not None and (not isinstance(max_q_switch_stages, int)
                                            or max_q_switch_stages < 1):
         raise ValueError("max_q_switch_stages must be a positive integer")
+    started_at = perf_counter()
     network.validate()
     # Q-limit PV -> PQ switching operates on a temporary network.
     # Never overwrite the GUI's original bus types or generator schedules.
@@ -108,6 +111,17 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
     Ybus, bus_index = build_ybus(network)
     voltage_mag = np.array([bus.voltage_mag_pu for bus in network.buses])
     voltage_angle = np.array([bus.voltage_angle_rad for bus in network.buses])
+
+    if initial_state is not None:
+        if not isinstance(initial_state, dict) or not {"voltage_mag", "voltage_angle"} <= set(initial_state):
+            raise ValueError("initial_state requires voltage_mag and voltage_angle arrays")
+        v0 = np.asarray(initial_state["voltage_mag"], dtype=float)
+        a0 = np.asarray(initial_state["voltage_angle"], dtype=float)
+        if v0.shape != voltage_mag.shape or a0.shape != voltage_angle.shape:
+            raise ValueError("Initial voltage arrays must match bus count")
+        if not np.all(np.isfinite(v0)) or not np.all(np.isfinite(a0)) or np.any(v0 <= 0):
+            raise ValueError("Invalid initial voltage state")
+        voltage_mag, voltage_angle = v0.copy(), a0.copy()
 
     # An explicitly configured generator setpoint wins over the bus
     # initialization. Keep the legacy default (1.0) as unspecified when
@@ -129,6 +143,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
         max_q_switch_stages = max(10, 4 * len(voltage_setpoints) + 4)
 
     history = []
+    iteration_times = []
     q_limit_events = []
 
     total_iterations = 0
@@ -140,6 +155,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
 
         for iteration in range(max_iterations + 1):
 
+            iteration_started_at = perf_counter()
             P_calc, Q_calc = calculate_power(
                 Ybus, voltage_mag, voltage_angle
             )
@@ -159,10 +175,12 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
             })
 
             if error <= tolerance:
+                iteration_times.append(perf_counter() - iteration_started_at)
                 converged = True
                 break
 
             if iteration == max_iterations:
+                iteration_times.append(perf_counter() - iteration_started_at)
                 break
 
             J = build_jacobian(
@@ -200,6 +218,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
                     or np.any(voltage_mag <= 0)):
                 raise RuntimeError("Invalid voltage state during Newton iteration")
             total_iterations += 1
+            iteration_times.append(perf_counter() - iteration_started_at)
 
         if not converged:
             break
@@ -241,6 +260,8 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
 
             return {
                 "converged": True,
+                "solve_time_s": perf_counter() - started_at,
+                "iteration_times_s": iteration_times,
                 "iterations": total_iterations,
                 "voltage_mag": voltage_mag,
                 "voltage_angle": voltage_angle,
@@ -259,6 +280,8 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
 
     return {
         "converged": False,
+        "solve_time_s": perf_counter() - started_at,
+        "iteration_times_s": iteration_times,
         "iterations": total_iterations,
         "voltage_mag": voltage_mag,
         "voltage_angle": voltage_angle,

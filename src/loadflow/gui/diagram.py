@@ -125,6 +125,18 @@ class NetworkDiagram(QGraphicsView):
         self.refresh(results)
         self.fit_diagram()
 
+    def restore_positions(self, positions):
+        """Restore saved bus coordinates after draw_network()."""
+        from PySide6.QtCore import QPointF
+        if self.network is None:
+            return
+        valid = {bus.bus_id for bus in self.network.buses}
+        for bus_id, coords in positions.items():
+            if int(bus_id) in valid:
+                self.bus_positions[int(bus_id)] = QPointF(float(coords[0]), float(coords[1]))
+        self.refresh()
+        self.fit_diagram()
+
     # =========================================================
     # DRAW BUSES
     # =========================================================
