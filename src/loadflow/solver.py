@@ -4,7 +4,8 @@ import copy
 
 from loadflow.ybus import build_ybus
 from loadflow.power import calculate_power
-from loadflow.specifications import calculate_specified_power
+from loadflow.specifications import (calculate_specified_power,
+    calculate_specified_power_voltage_derivatives)
 from loadflow.mismatch import calculate_mismatch
 from loadflow.jacobian import build_jacobian
 from loadflow.linear_solver import solve_correction
@@ -27,12 +28,11 @@ def calculate_system_summary(network, voltage_mag, generator_outputs, branch_flo
     )
 
     # Total load
-    P_load = sum(
-        load.p_mw for load in network.loads if load.status
-    )
-    Q_load = sum(
-        load.q_mvar for load in network.loads if load.status
-    )
+    bus_index = {bus.bus_id: i for i, bus in enumerate(network.buses)}
+    actual_loads = [load.power_at_voltage(voltage_mag[bus_index[load.bus_id]])
+                    for load in network.loads if load.status]
+    P_load = sum(item[0] for item in actual_loads)
+    Q_load = sum(item[1] for item in actual_loads)
 
     # Losses in lines and transformers
     P_branch_loss = sum(
@@ -100,8 +100,6 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
     network = copy.deepcopy(network)
 
     Ybus, bus_index = build_ybus(network)
-    P_spec, Q_spec = calculate_specified_power(network)
-
     voltage_mag = np.array([bus.voltage_mag_pu for bus in network.buses])
     voltage_angle = np.array([bus.voltage_angle_rad for bus in network.buses])
 
@@ -132,6 +130,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
             P_calc, Q_calc = calculate_power(
                 Ybus, voltage_mag, voltage_angle
             )
+            P_spec, Q_spec = calculate_specified_power(network, voltage_mag)
 
             mismatch, p_indices, q_indices = calculate_mismatch(
                 network, P_spec, Q_spec, P_calc, Q_calc
@@ -157,6 +156,16 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
                 network, Ybus, voltage_mag, voltage_angle,
                 P_calc, Q_calc, p_indices, q_indices
             )
+            # The mismatch is P_spec(V)-P_calc(V). The Newton matrix is
+            # dP_calc/dV - dP_spec/dV, likewise for Q.
+            dps, dqs = calculate_specified_power_voltage_derivatives(
+                network, voltage_mag)
+            n_p = len(p_indices)
+            for column, j in enumerate(q_indices):
+                for row, i in enumerate(p_indices):
+                    if i == j:
+                        J[row, n_p + column] -= dps[i]
+                J[n_p + column, n_p + column] -= dqs[j]
 
             try:
                 correction = solve_correction(J, mismatch)
@@ -189,7 +198,7 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
         if not q_events:
 
             generator_outputs = calculate_generator_outputs(
-                network, P_calc, Q_calc
+                network, P_calc, Q_calc, voltage_mag
             )
 
             branch_flows = calculate_line_flows(
@@ -216,7 +225,6 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
                 "effective_bus_types": {b.bus_id: b.bus_type for b in network.buses}
             }
 
-        P_spec, Q_spec = calculate_specified_power(network)
         stage += 1
 
     return {

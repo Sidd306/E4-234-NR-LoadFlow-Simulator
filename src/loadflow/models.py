@@ -44,10 +44,45 @@ class Load:
     p_mw: float = 0.0
     q_mvar: float = 0.0
     status: bool = True
+    # PQ, Z, or ZIP. P/Q specify nominal load at 1 pu.
+    model: str = "PQ"
+    p_zip: tuple[float, float, float] = (0.0, 0.0, 1.0)  # Z, I, P
+    q_zip: tuple[float, float, float] = (0.0, 0.0, 1.0)
 
     def __post_init__(self):
         if self.bus_id <= 0:
             raise ValueError("Bus ID must be positive")
+        self.validate_model()
+
+    def validate_model(self):
+        import math
+        if self.model not in ("PQ", "Z", "ZIP"):
+            raise ValueError("Load model must be PQ, Z or ZIP")
+        if self.model == "ZIP":
+            for label, coefficients in (("P", self.p_zip), ("Q", self.q_zip)):
+                if len(coefficients) != 3 or any(not math.isfinite(x) or x < 0 for x in coefficients):
+                    raise ValueError(f"Invalid {label} ZIP coefficients")
+                if not math.isclose(sum(coefficients), 1.0, rel_tol=0, abs_tol=1e-8):
+                    raise ValueError(f"{label} ZIP coefficients must sum to 1")
+
+    def power_at_voltage(self, voltage):
+        if self.model == "PQ":
+            return self.p_mw, self.q_mvar
+        if self.model == "Z":
+            return self.p_mw * voltage**2, self.q_mvar * voltage**2
+        def multiplier(coeff):
+            z, i, p = coeff
+            return z * voltage**2 + i * voltage + p
+        return self.p_mw * multiplier(self.p_zip), self.q_mvar * multiplier(self.q_zip)
+
+    def power_derivative(self, voltage):
+        if self.model == "PQ":
+            return 0.0, 0.0
+        if self.model == "Z":
+            return 2 * self.p_mw * voltage, 2 * self.q_mvar * voltage
+        pz, pi, _ = self.p_zip
+        qz, qi, _ = self.q_zip
+        return self.p_mw * (2 * pz * voltage + pi), self.q_mvar * (2 * qz * voltage + qi)
 
 @dataclass
 class Line:
@@ -178,6 +213,7 @@ class Network:
             if gen.q_min_mvar > gen.q_max_mvar or gen.voltage_setpoint_pu <= 0:
                 raise ValueError(f"Generator at bus {gen.bus_id}: invalid limits/setpoint")
         for load in self.loads:
+            load.validate_model()
             if not all(math.isfinite(v) for v in (load.p_mw, load.q_mvar)):
                 raise ValueError(f"Load at bus {load.bus_id}: non-finite data")
         for shunt in self.shunts:

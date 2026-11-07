@@ -1,4 +1,4 @@
-def check_q_limits(network, Q_calc):
+def check_q_limits(network, Q_calc, voltage_mag=None):
     """
     Check reactive power limits at PV buses.
 
@@ -23,8 +23,9 @@ def check_q_limits(network, Q_calc):
             continue
 
         # Calculate total reactive power required from generators
+        v = voltage_mag[i] if voltage_mag is not None else 1.0
         q_load = sum(
-            load.q_mvar
+            load.power_at_voltage(v)[1]
             for load in network.loads
             if load.bus_id == bus.bus_id and load.status
         )
