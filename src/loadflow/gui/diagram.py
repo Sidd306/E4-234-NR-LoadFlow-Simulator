@@ -345,7 +345,13 @@ class NetworkDiagram(QGraphicsView):
                 circle.setPen(
                     QPen(color, 2)
                 )
-
+                # Make the transformer symbol itself clickable for selection.
+                circle.setFlag(
+                    QGraphicsEllipseItem.GraphicsItemFlag.ItemIsSelectable,
+                    True
+                )
+                circle.setData(0, "Transformer")
+                circle.setData(1, index)
                 circle.setZValue(2)
                 self.scene.addItem(circle)
     # =========================================================
@@ -991,62 +997,85 @@ class NetworkDiagram(QGraphicsView):
             self.element_selected.emit(None)
 
     # =========================================================
-    # DELETE SELECTED BUS
+    # DELETE SELECTED ELEMENTS
     # =========================================================
 
     def delete_selected(self):
+        """Delete selected buses and/or equipment from the network model.
 
+        Store indices before modifying collections because the scene stores
+        indices for equipment. Removing indices from largest to smallest
+        avoids shifting the indices of elements not yet deleted.
+        """
         if self.network is None:
-            return
+            return False
 
-        selected = self.scene.selectedItems()
-
+        selected = list(self.scene.selectedItems())
         if not selected:
-            return
+            return False
 
-        item = selected[0]
+        collections = {
+            "Generator": "generators",
+            "Load": "loads",
+            "Shunt": "shunts",
+            "Line": "lines",
+            "Transformer": "transformers",
+        }
+        bus_ids = set()
+        indices = {name: set() for name in collections}
 
-        if item.data(0) != "Bus":
-            return
+        for item in selected:
+            element_type = item.data(0)
+            element_id = item.data(1)
+            if element_type == "Bus" and element_id is not None:
+                bus_ids.add(int(element_id))
+            elif element_type in indices and isinstance(element_id, int):
+                indices[element_type].add(element_id)
 
-        bus_id = item.data(1)
+        changed = False
 
-        self.network.buses = [
-            bus for bus in self.network.buses
-            if bus.bus_id != bus_id
-        ]
+        # Remove selected equipment (descending indices keep references valid).
+        for element_type, attr in collections.items():
+            elements = getattr(self.network, attr)
+            for index in sorted(indices[element_type], reverse=True):
+                if 0 <= index < len(elements):
+                    del elements[index]
+                    changed = True
 
-        self.network.generators = [
-            generator for generator in self.network.generators
-            if generator.bus_id != bus_id
-        ]
+        # Removing a bus also removes all components connected to it.
+        if bus_ids:
+            old_size = len(self.network.buses)
+            self.network.buses = [
+                bus for bus in self.network.buses
+                if bus.bus_id not in bus_ids
+            ]
+            changed |= len(self.network.buses) != old_size
 
-        self.network.loads = [
-            load for load in self.network.loads
-            if load.bus_id != bus_id
-        ]
+            for attr in ("generators", "loads", "shunts"):
+                elements = getattr(self.network, attr)
+                setattr(self.network, attr, [
+                    element for element in elements
+                    if element.bus_id not in bus_ids
+                ])
 
-        self.network.shunts = [
-            shunt for shunt in self.network.shunts
-            if shunt.bus_id != bus_id
-        ]
+            for attr in ("lines", "transformers"):
+                elements = getattr(self.network, attr)
+                setattr(self.network, attr, [
+                    element for element in elements
+                    if element.from_bus not in bus_ids
+                    and element.to_bus not in bus_ids
+                ])
 
-        self.network.lines = [
-            line for line in self.network.lines
-            if line.from_bus != bus_id
-            and line.to_bus != bus_id
-        ]
+            for bus_id in bus_ids:
+                self.bus_positions.pop(bus_id, None)
 
-        self.network.transformers = [
-            transformer for transformer in self.network.transformers
-            if transformer.from_bus != bus_id
-            and transformer.to_bus != bus_id
-        ]
-
-        self.bus_positions.pop(bus_id, None)
+        if not changed:
+            return False
 
         self.refresh()
         self.network_modified.emit()
+        self.element_selected.emit(None)
+        return True
 
     # =========================================================
     # REFRESH

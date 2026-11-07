@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QDockWidget,
     QListWidget, QFormLayout, QLineEdit, QStatusBar,
     QToolBar, QHeaderView, QDialog, QDialogButtonBox, QDoubleSpinBox,
-    QSpinBox, QCheckBox, QComboBox, QGroupBox
+    QSpinBox, QCheckBox, QComboBox, QGroupBox, QInputDialog
 )
 
 from loadflow.models import Network
+from loadflow.network_tools import convert_system_base, duplicate_buses
 from loadflow.reporting import collect_violations, export_html_report, export_pdf_report
 from loadflow.units import line_ohm_to_pu, line_pu_to_ohm, transformer_nameplate_to_system_pu, transformer_system_pu_to_nameplate
 from loadflow.project_io import save_project_file, load_project_file, project_to_dict, project_from_dict
@@ -104,6 +105,7 @@ class MainWindow(QMainWindow):
         self.previous_solution = None
         self.case_path = None
         self.project_path = None
+        self._copied_bus_ids = []
         self._history = []
         self._history_index = -1
         self._restoring_history = False
@@ -170,7 +172,7 @@ class MainWindow(QMainWindow):
     def create_actions(self):
 
         self.open_action = QAction("Import MATPOWER", self)
-        self.open_action.setShortcut("Ctrl+O")
+        self.open_action.setShortcut("Ctrl+Shift+I")
         self.open_action.triggered.connect(self.load_case)
 
         self.import_cdf_action = QAction("Import IEEE CDF...", self)
@@ -185,7 +187,7 @@ class MainWindow(QMainWindow):
         self.save_action.triggered.connect(self.save_project)
 
         self.open_project_action = QAction("Open Project...", self)
-        self.open_project_action.setShortcut("Ctrl+Shift+O")
+        self.open_project_action.setShortcut("Ctrl+O")
         self.open_project_action.triggered.connect(self.open_project)
 
         self.save_as_action = QAction("Save Project As...", self)
@@ -242,12 +244,172 @@ class MainWindow(QMainWindow):
         self.delete_action = QAction("Delete Element", self)
         self.delete_action.setShortcut("Delete")
         self.delete_action.triggered.connect(self.delete_element)
+
+        self.copy_action = QAction("Copy Selected Buses", self)
+        self.copy_action.setShortcut("Ctrl+C")
+        self.copy_action.triggered.connect(self.copy_selected_buses)
+        self.paste_action = QAction("Paste Buses", self)
+        self.paste_action.setShortcut("Ctrl+V")
+        self.paste_action.triggered.connect(self.paste_buses)
+        self.select_all_action = QAction("Select All Elements", self)
+        self.select_all_action.setShortcut("Ctrl+A")
+        self.select_all_action.triggered.connect(self.select_all_elements)
+        self.find_action = QAction("Find Bus...", self)
+        self.find_action.setShortcut("Ctrl+F")
+        self.find_action.triggered.connect(self.find_bus)
+        self.zoom_in_action = QAction("Zoom In", self)
+        # Ctrl+= works on keyboards where + is Shift+=; also accept Ctrl+Plus.
+        self.zoom_in_action.setShortcuts(["Ctrl+=", "Ctrl++", "Ctrl+Shift+="])
+        self.zoom_in_action.triggered.connect(lambda: self.diagram.scale(1.2, 1.2))
+        self.zoom_out_action = QAction("Zoom Out", self)
+        self.zoom_out_action.setShortcut("Ctrl+-")
+        self.zoom_out_action.triggered.connect(lambda: self.diagram.scale(1/1.2, 1/1.2))
+        self.auto_layout_action = QAction("Auto-layout Buses", self)
+        self.auto_layout_action.triggered.connect(self.auto_layout)
+        self.base_action = QAction("System Base and Frequency...", self)
+        self.base_action.triggered.connect(self.configure_network_base)
+        self.user_guide_action = QAction("User Guide", self)
+        self.user_guide_action.setShortcut("F1")
+        self.user_guide_action.triggered.connect(self.show_user_guide)
+        self.reset_panels_action = QAction("Reset Panel Layout", self)
+        self.reset_panels_action.triggered.connect(self.reset_panel_layout)
+    def _refresh_run_action(self):
+        """Keep Run disabled until the current network passes validation."""
+        valid = False
+        if self.network is not None:
+            try:
+                self.network.validate()
+                valid = True
+            except (ValueError, TypeError, RuntimeError):
+                pass
+        self.run_action.setEnabled(valid)
+        return valid
+
+    def _selected_bus_ids(self):
+        return [int(item.data(1)) for item in self.diagram.scene.selectedItems()
+                if item.data(0) == "Bus" and item.data(1) is not None]
+
+    def select_all_elements(self):
+        if self.network is None:
+            return
+        self.diagram.set_mode("select")
+        for item in self.diagram.scene.items():
+            if item.flags() & item.GraphicsItemFlag.ItemIsSelectable:
+                item.setSelected(True)
+
+    def copy_selected_buses(self):
+        self._copied_bus_ids = self._selected_bus_ids()
+        if self._copied_bus_ids:
+            self.status.showMessage(f"Copied {len(self._copied_bus_ids)} bus(es).", 5000)
+        else:
+            self.status.showMessage("Select one or more buses before copying.", 5000)
+
+    def paste_buses(self):
+        if self.network is None or not self._copied_bus_ids:
+            return
+        new_ids, new_positions = duplicate_buses(
+            self.network, self._copied_bus_ids, self.diagram.bus_positions)
+        if not new_ids:
+            return
+        from PySide6.QtCore import QPointF
+        self.diagram.bus_positions.update(
+            {bus_id: QPointF(*coords) for bus_id, coords in new_positions.items()})
+        self.diagram.refresh()
+        self.invalidate_results()
+        self.status.showMessage(f"Pasted {len(new_ids)} bus(es). Copied slack buses become PQ.", 7000)
+
+    def find_bus(self):
+        if self.network is None or not self.network.buses:
+            QMessageBox.information(self, "Find Bus", "No buses in the network.")
+            return
+        query, ok = QInputDialog.getText(self, "Find Bus", "Bus number or name:")
+        if not ok or not query.strip():
+            return
+        query = query.strip().lower()
+        bus = next((bus for bus in self.network.buses
+                    if str(bus.bus_id) == query or bus.name.lower() == query), None)
+        if bus is None:
+            QMessageBox.information(self, "Find Bus", f"No bus matches '{query}'.")
+            return
+        self._focus_bus(bus.bus_id)
+
+    def _focus_bus(self, bus_id):
+        item = self.diagram.bus_items.get(int(bus_id))
+        if item is None:
+            return
+        self.diagram.set_mode("select")
+        self.diagram.scene.clearSelection()
+        item.setSelected(True)
+        self.diagram.centerOn(item)
+        self.properties_dock.show()
+
+    def auto_layout(self):
+        if self.network is None:
+            return
+        self.diagram.bus_positions.clear()
+        self.diagram.draw_network(self.network)
+        self.invalidate_results()
+        self.diagram.fit_diagram()
+
+    def configure_network_base(self):
+        if self.network is None:
+            QMessageBox.information(self, "Network Settings", "Create or open a network first.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("System Base and Frequency")
+        layout = QFormLayout(dlg)
+        base = QDoubleSpinBox(dlg)
+        base.setRange(0.001, 1e9)
+        base.setDecimals(4)
+        base.setValue(self.network.base_mva)
+        frequency = QDoubleSpinBox(dlg)
+        frequency.setRange(1.0, 1000.0)
+        frequency.setDecimals(2)
+        frequency.setValue(self.network.frequency_hz)
+        layout.addRow("Base MVA", base)
+        layout.addRow("Frequency (Hz)", frequency)
+        note = QLabel("Changing MVA base automatically rescales per-unit impedances and admittances. "
+                      "Frequency is project metadata; existing line susceptances are not recalculated.")
+        note.setWordWrap(True)
+        layout.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            convert_system_base(self.network, base.value())
+            self.network.frequency_hz = frequency.value()
+            self.invalidate_results()
+            self.status.showMessage(
+                f"Base: {self.network.base_mva:g} MVA | {self.network.frequency_hz:g} Hz", 7000)
+
+    def reset_panel_layout(self):
+        for dock in (self.palette_dock, self.properties_dock, self.results_dock):
+            dock.show()
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.palette_dock)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.properties_dock)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.results_dock)
+        self.diagram.fit_diagram()
+
+    def show_user_guide(self):
+        QMessageBox.information(self, "Quick User Guide",
+            "1. File > New Network, or import a MATPOWER / IEEE CDF case.\n"
+            "2. Place buses; connect lines or transformers by clicking two buses.\n"
+            "3. Select an element to edit its properties.\n"
+            "4. Use Network > Check Network; F5 runs Newton-Raphson.\n"
+            "5. View results in the bottom dock; filter rows using the search field.\n"
+            "6. File > Save Project saves editable JSON; export reports from File.\n"
+            "7. Ctrl+Z/Y undo/redo; Ctrl+C/V duplicates selected buses and their equipment.\n"
+            "Copied lines/transformers are included only when both endpoints are selected.")
+
     def delete_element(self):
         if self.network is None:
             return
 
+        # NetworkDiagram emits network_modified only when an element was removed.
+        # The existing signal handler invalidates results and records undo history.
         self.diagram.delete_selected()
-        self.invalidate_results()
         
     def invalidate_results(self):
         self.results = None
@@ -256,7 +418,7 @@ class MainWindow(QMainWindow):
         self._record_history()
 
         if self.network is not None:
-            self.run_action.setEnabled(True)
+            self._refresh_run_action()
             self.status.showMessage("Network modified | Results invalidated")
     # =================================================
     # CENTRAL CANVAS
@@ -866,6 +1028,13 @@ class MainWindow(QMainWindow):
 
         results_container = QWidget()
         result_layout = QVBoxLayout(results_container)
+        self.results_filter = QLineEdit()
+        self.results_filter.setPlaceholderText("Filter current results table...")
+        self.results_filter.textChanged.connect(self.filter_result_rows)
+        result_layout.addWidget(self.results_filter)
+        self.bus_table.cellClicked.connect(self._bus_result_clicked)
+        self.branch_table.cellClicked.connect(self._branch_result_clicked)
+        self.generator_table.cellClicked.connect(self._bus_result_clicked_from_generator)
         result_layout.addWidget(self.convergence_button)
         result_layout.addWidget(self.results_tabs)
         self.results_dock.setWidget(results_container)
@@ -903,10 +1072,17 @@ class MainWindow(QMainWindow):
         edit_menu = menu.addMenu("Edit")
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
+        edit_menu.addAction(self.copy_action)
+        edit_menu.addAction(self.paste_action)
+        edit_menu.addAction(self.select_all_action)
+        edit_menu.addAction(self.find_action)
         edit_menu.addAction(self.delete_action)
 
         view_menu = menu.addMenu("View")
+        view_menu.addAction(self.zoom_in_action)
+        view_menu.addAction(self.zoom_out_action)
         view_menu.addAction(self.fit_action)
+        view_menu.addAction(self.reset_panels_action)
         view_menu.addAction(self.show_results_action)
 
         view_menu.addAction(
@@ -923,6 +1099,8 @@ class MainWindow(QMainWindow):
 
         network_menu = menu.addMenu("Network")
         network_menu.addAction(self.check_action)
+        network_menu.addAction(self.auto_layout_action)
+        network_menu.addAction(self.base_action)
 
         study_menu = menu.addMenu("Study")
         self.study_settings_action = QAction("Study Settings...", self)
@@ -938,6 +1116,7 @@ class MainWindow(QMainWindow):
         results_menu.addAction(self.export_html_action)
 
         help_menu = menu.addMenu("Help")
+        help_menu.addAction(self.user_guide_action)
         help_menu.addAction(self.about_action)
 
     # =================================================
@@ -1023,7 +1202,7 @@ class MainWindow(QMainWindow):
 
             self.clear_results()
 
-            self.run_action.setEnabled(True)
+            self._refresh_run_action()
 
             self.status.showMessage(
                 f"Loaded {Path(filepath).name} | "
@@ -1055,7 +1234,7 @@ class MainWindow(QMainWindow):
             self.diagram.draw_network(network)
             self._reset_history()
             self.clear_results()
-            self.run_action.setEnabled(True)
+            self._refresh_run_action()
             self.status.showMessage(
                 f"Imported IEEE CDF: {Path(filepath).name} | "
                 f"{len(network.buses)} buses | Base: {network.base_mva} MVA"
@@ -1088,7 +1267,7 @@ class MainWindow(QMainWindow):
 
         self.clear_results()
 
-        self.run_action.setEnabled(True)
+        self._refresh_run_action()
 
         self.status.showMessage(
             "New network | Add buses using the element palette"
@@ -1145,7 +1324,7 @@ class MainWindow(QMainWindow):
             self.results = None
             self.previous_solution = None
             self.clear_results()
-            self.run_action.setEnabled(bool(network.buses))
+            self._refresh_run_action()
         finally:
             self._restoring_history = False
         self._refresh_history_actions()
@@ -1199,7 +1378,7 @@ class MainWindow(QMainWindow):
             self.results = None
             self.previous_solution = None
             self.clear_results()
-            self.run_action.setEnabled(bool(network.buses))
+            self._refresh_run_action()
             self._reset_history()
             self.status.showMessage(f"Opened project: {path}", 6000)
         except Exception as exc:
@@ -1301,6 +1480,7 @@ class MainWindow(QMainWindow):
         try:
 
             self.network.validate()
+            self._refresh_run_action()
 
             QMessageBox.information(
                 self,
@@ -1309,6 +1489,7 @@ class MainWindow(QMainWindow):
             )
 
         except Exception as error:
+            self.run_action.setEnabled(False)
 
             QMessageBox.critical(
                 self,
@@ -1415,7 +1596,7 @@ class MainWindow(QMainWindow):
 
         finally:
 
-            self.run_action.setEnabled(True)
+            self._refresh_run_action()
 
     # =================================================
     # DISPLAY RESULTS
@@ -1452,6 +1633,7 @@ class MainWindow(QMainWindow):
         self.display_violations()
         self.display_history()
         self.display_summary()
+        self.filter_result_rows()
 
         self.status.showMessage(
             f"CONVERGED | Iterations: {r['iterations']} | "
@@ -1464,6 +1646,49 @@ class MainWindow(QMainWindow):
     # =================================================
     # BUS RESULTS
     # =================================================
+
+    def filter_result_rows(self, query=None):
+        query = (self.results_filter.text() if query is None else query).strip().lower()
+        for table in (self.bus_table, self.branch_table, self.generator_table,
+                      self.violations_table, self.history_table, self.summary_table):
+            for row in range(table.rowCount()):
+                matching = not query or any(
+                    query in (table.item(row, col).text().lower()
+                              if table.item(row, col) else "")
+                    for col in range(table.columnCount()))
+                table.setRowHidden(row, not matching)
+
+    def _bus_result_clicked(self, row, column):
+        item = self.bus_table.item(row, 0)
+        if item:
+            self._focus_bus(int(item.text()))
+
+    def _bus_result_clicked_from_generator(self, row, column):
+        item = self.generator_table.item(row, 0)
+        if item:
+            self._focus_bus(int(item.text()))
+
+    def _branch_result_clicked(self, row, column):
+        table = self.branch_table
+        kind = table.item(row, 0)
+        from_item = table.item(row, 1)
+        to_item = table.item(row, 2)
+        if not all((kind, from_item, to_item)):
+            return
+        for item in self.diagram.scene.items():
+            if item.data(0) != kind.text():
+                continue
+            index = item.data(1)
+            elements = (self.network.lines if kind.text() == 'Line'
+                        else self.network.transformers)
+            if not isinstance(index, int) or index >= len(elements):
+                continue
+            branch = elements[index]
+            if (str(branch.from_bus), str(branch.to_bus)) == (from_item.text(), to_item.text()):
+                self.diagram.scene.clearSelection()
+                item.setSelected(True)
+                self.diagram.centerOn(item)
+                return
 
     def display_bus_results(self):
 
