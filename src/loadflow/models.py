@@ -7,6 +7,9 @@ class Bus:
     voltage_mag_pu: float = 1.0
     voltage_angle_rad: float = 0.0
     name: str = ""
+    nominal_kv: float = 0.0  # 0 means unspecified; prevents fabricated kV readout
+    vmin_pu: float = 0.95
+    vmax_pu: float = 1.05
 
     def __post_init__(self):
         if self.bus_type not in ("Slack", "PV", "PQ"):
@@ -17,6 +20,8 @@ class Bus:
 
         if self.voltage_mag_pu <= 0:
             raise ValueError("Voltage magnitude must be positive")
+        if self.nominal_kv < 0 or not (0 < self.vmin_pu < self.vmax_pu):
+            raise ValueError("Invalid bus nominal voltage or voltage limits")
 
 @dataclass
 class Generator:
@@ -118,6 +123,12 @@ class Transformer:
     rate_mva: float = 0.0
     status: bool = True
     b_pu: float = 0.0
+    # Side carrying the off-nominal complex tap in the branch model.
+    tap_side: str = "from"  # "from" or "to"
+    # Optional fixed tap setting constraints; zero disables the corresponding check.
+    tap_min: float = 0.0
+    tap_max: float = 0.0
+    tap_step: float = 0.0
 
     def __post_init__(self):
         if self.from_bus <= 0 or self.to_bus <= 0:
@@ -131,6 +142,20 @@ class Transformer:
 
         if self.tap_ratio <= 0:
             raise ValueError("Tap ratio must be positive")
+        if self.tap_side not in ("from", "to"):
+            raise ValueError("Transformer tap side must be from or to")
+        if self.tap_min < 0 or self.tap_max < 0 or self.tap_step < 0:
+            raise ValueError("Tap range and step must be nonnegative")
+        if self.tap_min and self.tap_max and self.tap_min > self.tap_max:
+            raise ValueError("Transformer tap minimum exceeds maximum")
+        if self.tap_min and self.tap_ratio < self.tap_min - 1e-8:
+            raise ValueError("Tap ratio below tap minimum")
+        if self.tap_max and self.tap_ratio > self.tap_max + 1e-8:
+            raise ValueError("Tap ratio above tap maximum")
+        if self.tap_step and self.tap_min:
+            count = (self.tap_ratio - self.tap_min) / self.tap_step
+            if abs(count - round(count)) > 1e-6:
+                raise ValueError("Tap ratio must lie on the configured tap steps")
 
         if self.rate_mva < 0:
             raise ValueError("Transformer rating cannot be negative")
@@ -194,6 +219,9 @@ class Network:
         existing = set(ids)
 
         for bus in self.buses:
+            if (not all(math.isfinite(x) for x in (bus.nominal_kv, bus.vmin_pu, bus.vmax_pu))
+                or bus.nominal_kv < 0 or not (0 < bus.vmin_pu < bus.vmax_pu)):
+                raise ValueError(f"Bus {bus.bus_id}: invalid nominal kV or voltage limits")
             if bus.bus_type not in ("Slack", "PV", "PQ"):
                 raise ValueError(f"Bus {bus.bus_id}: invalid bus type")
             if (not math.isfinite(bus.voltage_mag_pu)
@@ -228,7 +256,22 @@ class Network:
                 raise ValueError("Branch cannot connect a bus to itself")
             vals = [branch.r_pu, branch.x_pu, branch.b_pu, branch.rate_mva]
             if isinstance(branch, Transformer):
-                vals += [branch.tap_ratio, branch.phase_shift_deg]
+                vals += [branch.tap_ratio, branch.phase_shift_deg,
+                         branch.tap_min, branch.tap_max, branch.tap_step]
+                if branch.tap_side not in ("from", "to"):
+                    raise ValueError("Transformer tap side must be from or to")
+                if min(branch.tap_min, branch.tap_max, branch.tap_step) < 0:
+                    raise ValueError("Transformer tap constraints must be nonnegative")
+                if branch.tap_min and branch.tap_max and branch.tap_min > branch.tap_max:
+                    raise ValueError("Transformer tap range is invalid")
+                if branch.tap_min and branch.tap_ratio < branch.tap_min - 1e-8:
+                    raise ValueError("Transformer tap below minimum")
+                if branch.tap_max and branch.tap_ratio > branch.tap_max + 1e-8:
+                    raise ValueError("Transformer tap above maximum")
+                if branch.tap_step and branch.tap_min:
+                    count = (branch.tap_ratio - branch.tap_min) / branch.tap_step
+                    if abs(count - round(count)) > 1e-6:
+                        raise ValueError("Transformer tap ratio is off its step grid")
                 if branch.tap_ratio <= 0:
                     raise ValueError("Transformer tap ratio must be positive")
             if not all(math.isfinite(v) for v in vals):

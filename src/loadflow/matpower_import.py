@@ -82,7 +82,10 @@ def load_matpower_case(filepath):
             bus_id=bus_id,
             bus_type=bus_types[bus_type_code],
             voltage_mag_pu=voltage_mag,
-            voltage_angle_rad=voltage_angle
+            voltage_angle_rad=voltage_angle,
+            nominal_kv=max(0.0, row[9]),
+            vmin_pu=row[12] if row[12] > 0 else 0.95,
+            vmax_pu=row[11] if row[11] > 0 else 1.05
         ))
 
         # MATPOWER Gs is MW consumed at 1 pu.

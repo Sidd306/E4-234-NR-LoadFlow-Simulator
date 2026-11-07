@@ -75,16 +75,13 @@ def calculate_line_flows(network, voltage_mag, voltage_angle):
             math.cos(phi), math.sin(phi)
         )
 
-        # Currents at both transformer ends
-        I_from = (
-            (y + y_sh) / abs(a)**2 * V[i]
-            - y / np.conj(a) * V[j]
-        )
-
-        I_to = (
-            -y / a * V[i]
-            + (y + y_sh) * V[j]
-        )
+        # Currents at both ends, consistent with the Ybus tap side.
+        if transformer.tap_side == "from":
+            I_from = (y + y_sh) / abs(a)**2 * V[i] - y / np.conj(a) * V[j]
+            I_to = -y / a * V[i] + (y + y_sh) * V[j]
+        else:
+            I_from = (y + y_sh) * V[i] - y / a * V[j]
+            I_to = -y / np.conj(a) * V[i] + (y + y_sh) / abs(a)**2 * V[j]
 
         # Complex powers in MW and MVAr
         S_from = V[i] * np.conj(I_from) * network.base_mva

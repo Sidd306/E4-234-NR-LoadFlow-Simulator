@@ -7,6 +7,8 @@ Requires-Dist: numpy
 Requires-Dist: scipy
 Requires-Dist: matplotlib
 Requires-Dist: PySide6
+Requires-Dist: openpyxl
+Requires-Dist: reportlab
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: pandapower; extra == "dev"

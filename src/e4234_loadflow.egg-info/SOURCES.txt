@@ -14,9 +14,12 @@ src/loadflow/matpower_import.py
 src/loadflow/mismatch.py
 src/loadflow/models.py
 src/loadflow/power.py
+src/loadflow/project_io.py
 src/loadflow/q_limits.py
+src/loadflow/reporting.py
 src/loadflow/solver.py
 src/loadflow/specifications.py
+src/loadflow/units.py
 src/loadflow/voltage_update.py
 src/loadflow/ybus.py
 src/loadflow/gui/__init__.py
@@ -28,8 +31,13 @@ tests/test_generator_outputs.py
 tests/test_ieee_solve.py
 tests/test_jacobian.py
 tests/test_matpower_import.py
+tests/test_project_io.py
 tests/test_q_limit_integration.py
+tests/test_q_limit_recovery.py
 tests/test_q_limits.py
 tests/test_regressions.py
+tests/test_reporting_units.py
 tests/test_solver.py
+tests/test_study_settings.py
 tests/test_transformer_flows.py
+tests/test_zip_loads.py

@@ -163,6 +163,12 @@ class NetworkDiagram(QGraphicsView):
                 )
             )
 
+            if results and results.get('converged'):
+                vm = float(results['voltage_mag'][index])
+                if vm < getattr(bus, 'vmin_pu', 0.95):
+                    color = QColor('#38bdf8')  # undervoltage
+                elif vm > getattr(bus, 'vmax_pu', 1.05):
+                    color = QColor('#f97316')  # overvoltage
             item.setPen(QPen(color, 5))
 
             item.setFlag(
@@ -213,7 +219,8 @@ class NetworkDiagram(QGraphicsView):
                     voltage = voltage_values[index]
 
                     voltage_label = QGraphicsTextItem(
-                        f"{voltage:.3f} pu"
+                        f"{voltage:.3f} pu / "
+                        f"{math.degrees(float(results['voltage_angle'][index])):.2f}°"
                     )
 
                     voltage_label.setDefaultTextColor(
@@ -279,6 +286,20 @@ class NetworkDiagram(QGraphicsView):
             p2.x(), p2.y()
         )
 
+        # Match the branch-flow ordering used by the load-flow solver.
+        flow = None
+        if self._results and self._results.get('converged'):
+            all_flows = [f for f in self._results.get('branch_flows', [])
+                         if f.get('element_type') == element_type]
+            components = self.network.lines if element_type == 'Line' else self.network.transformers
+            active_idx = sum(1 for x in components[:index] if x.status)
+            if active_idx < len(all_flows) and components[index].status:
+                flow = all_flows[active_idx]
+                loading = flow.get('loading_percent')
+                if loading is not None and loading > 100:
+                    color = QColor('#ef4444')
+                elif loading is not None and loading >= 80:
+                    color = QColor('#f59e0b')
         branch.setPen(QPen(color, 3))
         branch.setZValue(0)
 
@@ -291,6 +312,16 @@ class NetworkDiagram(QGraphicsView):
         branch.setData(1, index)
 
         self.scene.addItem(branch)
+        if flow is not None:
+            mx, my = (p1.x()+p2.x())/2, (p1.y()+p2.y())/2
+            loading = flow.get('loading_percent')
+            extra = 'unrated' if loading is None else f'{loading:.1f}%'
+            label = QGraphicsTextItem(
+                f"P {flow['P_from_mw']:.1f} MW / Q {flow['Q_from_mvar']:.1f} MVAr / {extra}")
+            label.setDefaultTextColor(QColor('#f8fafc'))
+            label.setPos(mx+8, my-18)
+            label.setZValue(4)
+            self.scene.addItem(label)
 
         # Transformer symbol
         if element_type == "Transformer":

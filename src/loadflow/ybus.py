@@ -56,10 +56,16 @@ def build_ybus(network):
             math.cos(phi), math.sin(phi)
         )
 
-        Ybus[i, i] += (y + y_sh) / abs(a)**2
-        Ybus[i, j] -= y / a.conjugate()
-        Ybus[j, i] -= y / a
-        Ybus[j, j] += y + y_sh
+        if transformer.tap_side == "from":
+            Ybus[i, i] += (y + y_sh) / abs(a)**2
+            Ybus[i, j] -= y / a.conjugate()
+            Ybus[j, i] -= y / a
+            Ybus[j, j] += y + y_sh
+        else:
+            Ybus[i, i] += y + y_sh
+            Ybus[i, j] -= y / a
+            Ybus[j, i] -= y / a.conjugate()
+            Ybus[j, j] += (y + y_sh) / abs(a)**2
 
     # Bus shunts
     for shunt in network.shunts:

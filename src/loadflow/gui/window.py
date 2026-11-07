@@ -17,8 +17,12 @@ from PySide6.QtWidgets import (
 )
 
 from loadflow.models import Network
+from loadflow.reporting import collect_violations, export_html_report, export_pdf_report
+from loadflow.units import line_ohm_to_pu, line_pu_to_ohm, transformer_nameplate_to_system_pu, transformer_system_pu_to_nameplate
 from loadflow.project_io import save_project_file, load_project_file, project_to_dict, project_from_dict
 from loadflow.matpower_import import load_matpower_case
+from loadflow.ieee_cdf_import import load_ieee_cdf
+from loadflow.matpower_export import save_matpower_case
 from loadflow.solver import solve_newton_raphson
 from loadflow.gui.diagram import NetworkDiagram
 from PySide6.QtGui import QDrag
@@ -169,6 +173,9 @@ class MainWindow(QMainWindow):
         self.open_action.setShortcut("Ctrl+O")
         self.open_action.triggered.connect(self.load_case)
 
+        self.import_cdf_action = QAction("Import IEEE CDF...", self)
+        self.import_cdf_action.triggered.connect(self.load_cdf_case)
+
         self.new_action = QAction("New Network", self)
         self.new_action.setShortcut("Ctrl+N")
         self.new_action.triggered.connect(self.new_network)
@@ -184,11 +191,18 @@ class MainWindow(QMainWindow):
         self.save_as_action = QAction("Save Project As...", self)
         self.save_as_action.triggered.connect(lambda: self.save_project(save_as=True))
 
+        self.export_matpower_action = QAction("Export MATPOWER Case...", self)
+        self.export_matpower_action.triggered.connect(self.export_matpower_case)
+
         self.export_csv_action = QAction("Export Results to CSV...", self)
         self.export_csv_action.triggered.connect(lambda: self.export_results("csv"))
         self.export_excel_action = QAction("Export Results to Excel...", self)
         self.export_excel_action.triggered.connect(lambda: self.export_results("xlsx"))
 
+        self.export_pdf_action = QAction("Export PDF Report...", self)
+        self.export_pdf_action.triggered.connect(lambda: self.export_report("pdf"))
+        self.export_html_action = QAction("Export HTML Report...", self)
+        self.export_html_action.triggered.connect(lambda: self.export_report("html"))
         self.exit_action = QAction("Exit", self)
         self.exit_action.triggered.connect(self.close)
 
@@ -437,6 +451,9 @@ class MainWindow(QMainWindow):
                     element.voltage_mag_pu)
             add_field("Voltage Angle (rad)", "voltage_angle_rad",
                     element.voltage_angle_rad)
+            add_field("Nominal voltage (kV; 0=unknown)", "nominal_kv", element.nominal_kv)
+            add_field("Minimum voltage (pu)", "vmin_pu", element.vmin_pu)
+            add_field("Maximum voltage (pu)", "vmax_pu", element.vmax_pu)
 
         # ---------------- GENERATOR ----------------
 
@@ -489,6 +506,14 @@ class MainWindow(QMainWindow):
             add_field("Reactance (pu)", "x_pu", element.x_pu)
             add_field("Shunt Susceptance (pu)", "b_pu", element.b_pu)
             add_field("Rating (MVA)", "rate_mva", element.rate_mva)
+            # If nominal kV is specified on the from bus, physical line
+            # resistance/reactance may be entered instead of per-unit values.
+            from_bus = next((b for b in self.network.buses if b.bus_id == element.from_bus), None)
+            if from_bus and from_bus.nominal_kv > 0:
+                ro, xo = line_pu_to_ohm(element.r_pu, element.x_pu,
+                                       from_bus.nominal_kv, self.network.base_mva)
+                add_field("Resistance (Ohm) - optional", "r_ohm", ro)
+                add_field("Reactance (Ohm) - optional", "x_ohm", xo)
 
         # ---------------- TRANSFORMER ----------------
 
@@ -506,9 +531,29 @@ class MainWindow(QMainWindow):
             add_field("Reactance (pu)", "x_pu", element.x_pu)
             add_field("Shunt Susceptance (pu)", "b_pu", element.b_pu)
             add_field("Tap Ratio", "tap_ratio", element.tap_ratio)
+            tap_side_box = QComboBox()
+            tap_side_box.addItems(["from", "to"])
+            tap_side_box.setCurrentText(element.tap_side)
+            self.property_inputs["tap_side"] = tap_side_box
+            self.property_edit_form.addRow("Off-nominal tap side", tap_side_box)
+            add_field("Tap minimum (0=unset)", "tap_min", element.tap_min)
+            add_field("Tap maximum (0=unset)", "tap_max", element.tap_max)
+            add_field("Tap step (0=unset)", "tap_step", element.tap_step)
             add_field("Phase Shift (deg)", "phase_shift_deg",
                     element.phase_shift_deg)
             add_field("Rating (MVA)", "rate_mva", element.rate_mva)
+            # Optional nameplate entry; values are NOT saved as separate metadata:
+            # they are converted to the system-base R and X when applied.
+            bus_hv = next((b for b in self.network.buses if b.bus_id == element.from_bus), None)
+            if bus_hv and bus_hv.nominal_kv > 0 and element.rate_mva > 0:
+                add_field("Nameplate rated MVA", "rated_mva", element.rate_mva)
+                add_field("Nameplate HV kV", "rated_hv_kv", bus_hv.nominal_kv)
+                if element.r_pu > 0 and element.x_pu > 0:
+                    z_pct, xr = transformer_system_pu_to_nameplate(
+                        element.r_pu, element.x_pu, element.rate_mva,
+                        bus_hv.nominal_kv, self.network.base_mva, bus_hv.nominal_kv)
+                    add_field("Nameplate impedance (%)", "z_percent", z_pct)
+                    add_field("Nameplate X/R", "xr_ratio", xr)
 
         # ---------------- SHUNT ----------------
 
@@ -555,7 +600,7 @@ class MainWindow(QMainWindow):
 
             for key, value in values.items():
 
-                if key in ("bus_type", "model", "p_zip", "q_zip"):
+                if key in ("bus_type", "model", "p_zip", "q_zip", "tap_side"):
                     continue
 
                 numeric_values[key] = float(value)
@@ -589,7 +634,15 @@ class MainWindow(QMainWindow):
 
                 element.bus_type = bus_type
                 element.voltage_mag_pu = voltage
+                nominal = numeric_values['nominal_kv']
+                vmin = numeric_values['vmin_pu']
+                vmax = numeric_values['vmax_pu']
+                if nominal < 0 or not (0 < vmin < vmax):
+                    raise ValueError('Nominal kV must be nonnegative and 0 < Vmin < Vmax')
                 element.voltage_angle_rad = angle
+                element.nominal_kv = nominal
+                element.vmin_pu = vmin
+                element.vmax_pu = vmax
 
             # ---------------- GENERATOR ----------------
 
@@ -658,8 +711,26 @@ class MainWindow(QMainWindow):
                     raise ValueError("Line impedance R+jX cannot be zero")
                 if numeric_values["rate_mva"] < 0:
                     raise ValueError("Line rating cannot be negative")
-                element.r_pu = numeric_values["r_pu"]
-                element.x_pu = numeric_values["x_pu"]
+                # Physical ohm values are optional. They are used only when
+                # the user changes them; otherwise preserve edited pu fields.
+                rpu, xpu = numeric_values['r_pu'], numeric_values['x_pu']
+                if 'r_ohm' in numeric_values:
+                    bus = next(b for b in self.network.buses if b.bus_id == element.from_bus)
+                    ro_old, xo_old = line_pu_to_ohm(element.r_pu, element.x_pu,
+                                                bus.nominal_kv, self.network.base_mva)
+                    ro, xo = numeric_values['r_ohm'], numeric_values['x_ohm']
+                    ohm_changed = not (math.isclose(ro, ro_old, abs_tol=1e-9) and
+                                       math.isclose(xo, xo_old, abs_tol=1e-9))
+                    pu_changed = not (math.isclose(rpu, element.r_pu, abs_tol=1e-12) and
+                                      math.isclose(xpu, element.x_pu, abs_tol=1e-12))
+                    if ohm_changed and pu_changed:
+                        raise ValueError('Edit either pu or Ohm impedance, not both simultaneously')
+                    if ohm_changed:
+                        rpu, xpu = line_ohm_to_pu(ro, xo, bus.nominal_kv, self.network.base_mva)
+                if rpu == 0 and xpu == 0:
+                    raise ValueError('Line impedance R+jX cannot be zero')
+                element.r_pu = rpu
+                element.x_pu = xpu
                 element.b_pu = numeric_values["b_pu"]
                 element.rate_mva = numeric_values["rate_mva"]
 
@@ -678,10 +749,48 @@ class MainWindow(QMainWindow):
                     raise ValueError("Transformer impedance R+jX cannot be zero")
                 if numeric_values["rate_mva"] < 0:
                     raise ValueError("Transformer rating cannot be negative")
-                element.r_pu = numeric_values["r_pu"]
-                element.x_pu = numeric_values["x_pu"]
+                rpu, xpu = numeric_values["r_pu"], numeric_values["x_pu"]
+                if 'z_percent' in numeric_values:
+                    bus_hv = next(b for b in self.network.buses if b.bus_id == element.from_bus)
+                    z0, xr0 = transformer_system_pu_to_nameplate(
+                        element.r_pu, element.x_pu, element.rate_mva,
+                        bus_hv.nominal_kv, self.network.base_mva, bus_hv.nominal_kv)
+                    changed_np = any(not math.isclose(numeric_values[key], old, rel_tol=1e-9, abs_tol=1e-9)
+                                     for key, old in [('z_percent', z0), ('xr_ratio', xr0),
+                                                      ('rated_mva', element.rate_mva),
+                                                      ('rated_hv_kv', bus_hv.nominal_kv)])
+                    changed_pu = (not math.isclose(rpu, element.r_pu, rel_tol=1e-9, abs_tol=1e-12)
+                                  or not math.isclose(xpu, element.x_pu, rel_tol=1e-9, abs_tol=1e-12))
+                    if changed_np and changed_pu:
+                        raise ValueError('Edit either transformer nameplate or pu impedance, not both')
+                    if changed_np:
+                        rpu, xpu = transformer_nameplate_to_system_pu(
+                            numeric_values['z_percent'], numeric_values['xr_ratio'],
+                            numeric_values['rated_mva'], numeric_values['rated_hv_kv'],
+                            self.network.base_mva, bus_hv.nominal_kv)
+                element.r_pu = rpu
+                element.x_pu = xpu
                 element.b_pu = numeric_values["b_pu"]
+                side = values["tap_side"]
+                tmin, tmax, step = (numeric_values[k]
+                                    for k in ("tap_min", "tap_max", "tap_step"))
+                if side not in ("from", "to") or min(tmin, tmax, step) < 0:
+                    raise ValueError("Invalid tap side/range/step")
+                if tmin and tmax and tmin > tmax:
+                    raise ValueError("Tap minimum exceeds tap maximum")
+                if tmin and tap_ratio < tmin - 1e-8:
+                    raise ValueError("Tap ratio is below minimum")
+                if tmax and tap_ratio > tmax + 1e-8:
+                    raise ValueError("Tap ratio is above maximum")
+                if step and tmin:
+                    count = (tap_ratio - tmin) / step
+                    if abs(count - round(count)) > 1e-6:
+                        raise ValueError("Tap ratio is not aligned with the tap step")
                 element.tap_ratio = tap_ratio
+                element.tap_side = side
+                element.tap_min = tmin
+                element.tap_max = tmax
+                element.tap_step = step
                 element.phase_shift_deg = numeric_values["phase_shift_deg"]
                 element.rate_mva = numeric_values["rate_mva"]
 
@@ -779,11 +888,15 @@ class MainWindow(QMainWindow):
         file_menu = menu.addMenu("File")
         file_menu.addAction(self.new_action)
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.import_cdf_action)
         file_menu.addAction(self.open_project_action)
         file_menu.addAction(self.save_action)
         file_menu.addAction(self.save_as_action)
+        file_menu.addAction(self.export_matpower_action)
         file_menu.addAction(self.export_csv_action)
         file_menu.addAction(self.export_excel_action)
+        file_menu.addAction(self.export_pdf_action)
+        file_menu.addAction(self.export_html_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
@@ -821,6 +934,8 @@ class MainWindow(QMainWindow):
         results_menu.addAction(self.show_results_action)
         results_menu.addAction(self.export_csv_action)
         results_menu.addAction(self.export_excel_action)
+        results_menu.addAction(self.export_pdf_action)
+        results_menu.addAction(self.export_html_action)
 
         help_menu = menu.addMenu("Help")
         help_menu.addAction(self.about_action)
@@ -867,6 +982,20 @@ class MainWindow(QMainWindow):
     # NETWORK OPERATIONS
     # =================================================
 
+    def export_matpower_case(self):
+        if self.network is None:
+            QMessageBox.warning(self, 'Export MATPOWER', 'Create or import a network first.')
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Export MATPOWER Case',
+                                              'case_export.m', 'MATPOWER case (*.m)')
+        if not path:
+            return
+        try:
+            save_matpower_case(path, self.network)
+            self.status.showMessage(f'Exported MATPOWER case: {path}', 5000)
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, 'MATPOWER Export Error', str(exc))
+
     def load_case(self):
 
         filepath, _ = QFileDialog.getOpenFileName(
@@ -909,6 +1038,31 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self, "Import Error", str(error)
             )
+
+    def load_cdf_case(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Import IEEE Common Data Format", "",
+            "IEEE CDF Files (*.cdf *.txt *.dat);;All Files (*)"
+        )
+        if not filepath:
+            return
+        try:
+            network = load_ieee_cdf(filepath)
+            self.network = network
+            self.results = None
+            self.case_path = filepath
+            self.project_path = None
+            self.diagram.draw_network(network)
+            self._reset_history()
+            self.clear_results()
+            self.run_action.setEnabled(True)
+            self.status.showMessage(
+                f"Imported IEEE CDF: {Path(filepath).name} | "
+                f"{len(network.buses)} buses | Base: {network.base_mva} MVA"
+            )
+            self.results_dock.show()
+        except (ValueError, OSError) as exc:
+            QMessageBox.critical(self, "IEEE CDF Import Error", str(exc))
 
     def new_network(self):
 
@@ -1105,6 +1259,31 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Export Error", str(exc))
 
+    def export_report(self, fmt):
+        if not self.results or not self.results.get('converged'):
+            QMessageBox.warning(self, 'Report', 'Run a converged load flow first.')
+            return
+        ext = 'pdf' if fmt == 'pdf' else 'html'
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Load Flow Report', f'load_flow_report.{ext}',
+            'PDF (*.pdf)' if fmt == 'pdf' else 'HTML (*.html)')
+        if not path:
+            return
+        if not path.lower().endswith('.' + ext):
+            path += '.' + ext
+        try:
+            import tempfile
+            with tempfile.TemporaryDirectory() as folder:
+                diagram_path = str(Path(folder) / 'diagram.png')
+                self.diagram.grab().save(diagram_path, 'PNG')
+                if fmt == 'pdf':
+                    export_pdf_report(path, self.network, self.results, diagram_path)
+                else:
+                    export_html_report(path, self.network, self.results, diagram_path)
+            self.status.showMessage(f'Exported report: {path}', 6000)
+        except Exception as exc:
+            QMessageBox.critical(self, 'Report Export Error', str(exc))
+
     # =================================================
     # NETWORK VALIDATION
     # =================================================
@@ -1270,6 +1449,7 @@ class MainWindow(QMainWindow):
         self.display_bus_results()
         self.display_branch_results()
         self.display_generator_results()
+        self.display_violations()
         self.display_history()
         self.display_summary()
 
@@ -1296,6 +1476,7 @@ class MainWindow(QMainWindow):
                 bus.bus_id,
                 r.get("effective_bus_types", {}).get(bus.bus_id, bus.bus_type),
                 r["voltage_mag"][i],
+                (r["voltage_mag"][i] * bus.nominal_kv if bus.nominal_kv > 0 else None),
                 r["voltage_angle"][i] * 180 / 3.141592653589793,
                 r["P_calc"][i] * self.network.base_mva,
                 r["Q_calc"][i] * self.network.base_mva
@@ -1306,6 +1487,7 @@ class MainWindow(QMainWindow):
                 "Bus",
                 "Type",
                 "V (pu)",
+                "V (kV)",
                 "Angle (deg)",
                 "P Injection (MW)",
                 "Q Injection (MVAr)"
@@ -1382,6 +1564,13 @@ class MainWindow(QMainWindow):
             ],
             rows
         )
+
+    def display_violations(self):
+        issues = collect_violations(self.network, self.results)
+        self.violations_table.set_data(
+            ['Type', 'Element', 'Value', 'Limit', 'Severity'],
+            [[x['kind'], x['element'], x['value'], x['limit'], x['severity']]
+             for x in issues])
 
     # =================================================
     # ITERATION HISTORY
