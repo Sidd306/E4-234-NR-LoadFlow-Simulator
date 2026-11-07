@@ -88,12 +88,18 @@ def calculate_system_summary(network, voltage_mag, generator_outputs, branch_flo
     }
 
 
-def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
+def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20,
+                         enforce_q_limits=True, max_q_switch_stages=None):
 
     if not np.isfinite(tolerance) or tolerance <= 0:
         raise ValueError("Tolerance must be finite and positive")
     if not isinstance(max_iterations, int) or max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer")
+    if not isinstance(enforce_q_limits, bool):
+        raise ValueError("enforce_q_limits must be boolean")
+    if max_q_switch_stages is not None and (not isinstance(max_q_switch_stages, int)
+                                           or max_q_switch_stages < 1):
+        raise ValueError("max_q_switch_stages must be a positive integer")
     network.validate()
     # Q-limit PV -> PQ switching operates on a temporary network.
     # Never overwrite the GUI's original bus types or generator schedules.
@@ -114,6 +120,13 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
                         if abs(g.voltage_setpoint_pu - 1.0) > 1e-10]
             if explicit:
                 voltage_mag[i] = explicit[0]
+
+    # Preserve each PV bus's prescribed voltage for possible PQ->PV recovery.
+    voltage_setpoints = {b.bus_id: float(voltage_mag[i])
+                         for i, b in enumerate(network.buses) if b.bus_type == 'PV'}
+    limited_buses = {}
+    if max_q_switch_stages is None:
+        max_q_switch_stages = max(10, 4 * len(voltage_setpoints) + 4)
 
     history = []
     q_limit_events = []
@@ -191,9 +204,26 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
         if not converged:
             break
 
-        # Check Q limits after convergence
-        q_events = check_q_limits(network, Q_calc)
+        # Only evaluate switching at a fully converged operating point.
+        # Both initial limiting and later recovery use voltage-dependent Q loads.
+        q_events = (
+            check_q_limits(network, Q_calc, voltage_mag,
+                           limited_buses=limited_buses,
+                           voltage_setpoints=voltage_setpoints)
+            if enforce_q_limits else []
+        )
+        for event in q_events:
+            event['stage'] = stage
         q_limit_events.extend(q_events)
+        for event in q_events:
+            if event['action'] == 'PQ->PV':
+                i = bus_index[event['bus_id']]
+                voltage_mag[i] = voltage_setpoints[event['bus_id']]
+        if q_events and stage >= max_q_switch_stages:
+            raise RuntimeError(
+                f"Q-limit switching did not settle within {max_q_switch_stages} "
+                "stages; inspect q_limit_events and generator limits"
+            )
 
         if not q_events:
 
