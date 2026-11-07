@@ -1,0 +1,8 @@
+numpy
+scipy
+matplotlib
+PySide6
+
+[dev]
+pytest
+pandapower

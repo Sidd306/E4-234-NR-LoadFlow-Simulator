@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e4234-loadflow"
+version = "1.0.0"
+description = "Newton-Raphson Power System Load Flow Simulator"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "PySide6"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pandapower"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

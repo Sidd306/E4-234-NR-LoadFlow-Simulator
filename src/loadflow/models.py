@@ -82,6 +82,7 @@ class Transformer:
     phase_shift_deg: float = 0.0
     rate_mva: float = 0.0
     status: bool = True
+    b_pu: float = 0.0
 
     def __post_init__(self):
         if self.from_bus <= 0 or self.to_bus <= 0:
@@ -98,7 +99,6 @@ class Transformer:
 
         if self.rate_mva < 0:
             raise ValueError("Transformer rating cannot be negative")
-
 @dataclass
 class Shunt:
     bus_id: int
@@ -144,41 +144,90 @@ class Network:
         self.shunts.append(shunt)
     
     def validate(self):
-        if self.base_mva <= 0:
-            raise ValueError("Base MVA must be positive")
+        """Validate the CURRENT network, including values edited after creation."""
+        import math
 
+        if not math.isfinite(self.base_mva) or self.base_mva <= 0:
+            raise ValueError("Base MVA must be finite and positive")
         if not self.buses:
             raise ValueError("Network must contain at least one bus")
-
-        bus_ids = [bus.bus_id for bus in self.buses]
-
-        if len(bus_ids) != len(set(bus_ids)):
+        ids = [b.bus_id for b in self.buses]
+        if len(ids) != len(set(ids)):
             raise ValueError("Duplicate bus IDs found")
-
-        slack_count = sum(
-            bus.bus_type == "Slack" for bus in self.buses
-        )
-
-        if slack_count != 1:
+        if sum(b.bus_type == "Slack" for b in self.buses) != 1:
             raise ValueError("Network must contain exactly one Slack bus")
+        existing = set(ids)
 
-        existing_buses = set(bus_ids)
+        for bus in self.buses:
+            if bus.bus_type not in ("Slack", "PV", "PQ"):
+                raise ValueError(f"Bus {bus.bus_id}: invalid bus type")
+            if (not math.isfinite(bus.voltage_mag_pu)
+                    or bus.voltage_mag_pu <= 0
+                    or not math.isfinite(bus.voltage_angle_rad)):
+                raise ValueError(f"Bus {bus.bus_id}: invalid voltage or angle")
 
         for component in self.generators + self.loads + self.shunts:
-            if component.bus_id not in existing_buses:
-                raise ValueError(
-                    f"Bus {component.bus_id} does not exist"
-                )
+            if component.bus_id not in existing:
+                raise ValueError(f"Bus {component.bus_id} does not exist")
 
-        for component in self.lines + self.transformers:
-            if component.from_bus not in existing_buses:
-                raise ValueError(
-                    f"Bus {component.from_bus} does not exist"
-                )
+        for gen in self.generators:
+            vals = (gen.p_mw, gen.q_mvar, gen.q_min_mvar,
+                    gen.q_max_mvar, gen.voltage_setpoint_pu)
+            if not all(math.isfinite(v) for v in vals):
+                raise ValueError(f"Generator at bus {gen.bus_id}: non-finite data")
+            if gen.q_min_mvar > gen.q_max_mvar or gen.voltage_setpoint_pu <= 0:
+                raise ValueError(f"Generator at bus {gen.bus_id}: invalid limits/setpoint")
+        for load in self.loads:
+            if not all(math.isfinite(v) for v in (load.p_mw, load.q_mvar)):
+                raise ValueError(f"Load at bus {load.bus_id}: non-finite data")
+        for shunt in self.shunts:
+            if not all(math.isfinite(v) for v in (shunt.g_pu, shunt.b_pu)):
+                raise ValueError(f"Shunt at bus {shunt.bus_id}: non-finite data")
 
-            if component.to_bus not in existing_buses:
-                raise ValueError(
-                    f"Bus {component.to_bus} does not exist"
-                )
+        adjacency = {bus_id: set() for bus_id in ids}
+        for branch in self.lines + self.transformers:
+            if branch.from_bus not in existing or branch.to_bus not in existing:
+                raise ValueError(f"Branch {branch.from_bus}-{branch.to_bus}: unknown bus")
+            if branch.from_bus == branch.to_bus:
+                raise ValueError("Branch cannot connect a bus to itself")
+            vals = [branch.r_pu, branch.x_pu, branch.b_pu, branch.rate_mva]
+            if isinstance(branch, Transformer):
+                vals += [branch.tap_ratio, branch.phase_shift_deg]
+                if branch.tap_ratio <= 0:
+                    raise ValueError("Transformer tap ratio must be positive")
+            if not all(math.isfinite(v) for v in vals):
+                raise ValueError(f"Branch {branch.from_bus}-{branch.to_bus}: non-finite data")
+            if branch.r_pu == 0 and branch.x_pu == 0:
+                raise ValueError(f"Branch {branch.from_bus}-{branch.to_bus}: zero impedance")
+            if branch.rate_mva < 0:
+                raise ValueError("Branch rating cannot be negative")
+            if branch.status:
+                adjacency[branch.from_bus].add(branch.to_bus)
+                adjacency[branch.to_bus].add(branch.from_bus)
 
+        # Only one slack bus is supported; consequently all buses must
+        # belong to its connected electrical island.
+        slack = next(b.bus_id for b in self.buses if b.bus_type == "Slack")
+        visited, pending = set(), [slack]
+        while pending:
+            bus_id = pending.pop()
+            if bus_id in visited:
+                continue
+            visited.add(bus_id)
+            pending.extend(adjacency[bus_id] - visited)
+        if len(visited) != len(existing):
+            missing = sorted(existing - visited)
+            raise ValueError(f"Disconnected buses not reachable from slack: {missing}")
+
+        for bus in self.buses:
+            online = [g for g in self.generators if g.status and g.bus_id == bus.bus_id]
+            if bus.bus_type == "PV" and not online:
+                raise ValueError(f"PV bus {bus.bus_id} has no online generator")
+            if bus.bus_type in ("PV", "Slack") and len(online) > 1:
+                setpoints = [g.voltage_setpoint_pu for g in online]
+                # Default 1 pu is conventionally an unspecified setpoint
+                # in projects constructed directly with these dataclasses.
+                specified = [v for v in setpoints if abs(v - 1.0) > 1e-10]
+                if specified and max(specified) - min(specified) > 1e-6:
+                    raise ValueError(f"Conflicting generator voltage setpoints at bus {bus.bus_id}")
         return True

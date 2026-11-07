@@ -38,11 +38,10 @@ def test_pv_to_pq_switching():
     # Verify convergence
     assert results["converged"]
 
-    # Verify PV-to-PQ conversion
-    assert network.buses[1].bus_type == "PQ"
-
-    # Verify generator Q limit
-    assert generator.q_mvar == -10
+    # Effective operating bus becomes PQ; original model remains unchanged.
+    assert results["effective_bus_types"][2] == "PQ"
+    assert network.buses[1].bus_type == "PV"
+    assert generator.q_mvar == 0.0
 
     # Verify Q-limit event
     assert len(results["q_limit_events"]) == 1
@@ -52,6 +51,6 @@ def test_pv_to_pq_switching():
     assert any(entry["stage"] == 2 for entry in results["history"])
 
     print("\nPV-to-PQ switching test passed!")
-    print("Bus 2 converted from PV to PQ.")
-    print("Generator Q set to:", generator.q_mvar, "MVAr")
+    print("Bus 2 temporarily converted from PV to PQ.")
+    print("Original generator schedule remains:", generator.q_mvar, "MVAr")
     print("Total NR iterations:", results["iterations"])

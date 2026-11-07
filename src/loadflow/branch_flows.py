@@ -67,6 +67,8 @@ def calculate_line_flows(network, voltage_mag, voltage_angle):
         z = complex(transformer.r_pu, transformer.x_pu)
         y = 1 / z
 
+        y_sh = 1j * transformer.b_pu / 2
+
         phi = math.radians(transformer.phase_shift_deg)
 
         a = transformer.tap_ratio * complex(
@@ -75,13 +77,13 @@ def calculate_line_flows(network, voltage_mag, voltage_angle):
 
         # Currents at both transformer ends
         I_from = (
-            y / abs(a)**2 * V[i]
+            (y + y_sh) / abs(a)**2 * V[i]
             - y / np.conj(a) * V[j]
         )
 
         I_to = (
             -y / a * V[i]
-            + y * V[j]
+            + (y + y_sh) * V[j]
         )
 
         # Complex powers in MW and MVAr

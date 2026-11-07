@@ -15,8 +15,9 @@ def calculate_generator_outputs(network, P_calc, Q_calc):
             if gen.bus_id == bus.bus_id and gen.status
         ]
 
-        # Skip buses without online generators
-        if not generators:
+        # A Slack bus represents an external-grid source even when no
+        # explicit Generator object was created in the GUI.
+        if not generators and bus.bus_type != "Slack":
             continue
 
         i = bus_index[bus.bus_id]
@@ -42,7 +43,8 @@ def calculate_generator_outputs(network, P_calc, Q_calc):
             "bus_id": bus.bus_id,
             "P_generation_mw": P_generation,
             "Q_generation_mvar": Q_generation,
-            "generator_count": len(generators)
+            "generator_count": len(generators),
+            "source_type": "External Grid" if not generators else "Generator",
         })
 
     return results

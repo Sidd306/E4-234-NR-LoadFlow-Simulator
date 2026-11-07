@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: e4234-loadflow
+Version: 1.0.0
+Summary: Newton-Raphson Power System Load Flow Simulator
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: PySide6
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pandapower; extra == "dev"

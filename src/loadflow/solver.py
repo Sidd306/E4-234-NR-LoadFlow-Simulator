@@ -1,5 +1,6 @@
 
 import numpy as np
+import copy
 
 from loadflow.ybus import build_ybus
 from loadflow.power import calculate_power
@@ -89,13 +90,32 @@ def calculate_system_summary(network, voltage_mag, generator_outputs, branch_flo
 
 def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
 
+    if not np.isfinite(tolerance) or tolerance <= 0:
+        raise ValueError("Tolerance must be finite and positive")
+    if not isinstance(max_iterations, int) or max_iterations < 1:
+        raise ValueError("max_iterations must be a positive integer")
     network.validate()
+    # Q-limit PV -> PQ switching operates on a temporary network.
+    # Never overwrite the GUI's original bus types or generator schedules.
+    network = copy.deepcopy(network)
 
     Ybus, bus_index = build_ybus(network)
     P_spec, Q_spec = calculate_specified_power(network)
 
     voltage_mag = np.array([bus.voltage_mag_pu for bus in network.buses])
     voltage_angle = np.array([bus.voltage_angle_rad for bus in network.buses])
+
+    # An explicitly configured generator setpoint wins over the bus
+    # initialization. Keep the legacy default (1.0) as unspecified when
+    # a manually constructed bus carries a different voltage value.
+    for i, bus in enumerate(network.buses):
+        if bus.bus_type in ("PV", "Slack"):
+            gens = [g for g in network.generators
+                    if g.status and g.bus_id == bus.bus_id]
+            explicit = [g.voltage_setpoint_pu for g in gens
+                        if abs(g.voltage_setpoint_pu - 1.0) > 1e-10]
+            if explicit:
+                voltage_mag[i] = explicit[0]
 
     history = []
     q_limit_events = []
@@ -138,13 +158,25 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
                 P_calc, Q_calc, p_indices, q_indices
             )
 
-            correction = solve_correction(J, mismatch)
+            try:
+                correction = solve_correction(J, mismatch)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Newton-Raphson linear solve failed at iteration "
+                    f"{total_iterations}: {exc}"
+                ) from exc
+            if not np.all(np.isfinite(correction)):
+                raise RuntimeError("Newton correction contains NaN/Inf")
 
             voltage_mag, voltage_angle = update_voltages(
                 voltage_mag, voltage_angle,
                 correction, p_indices, q_indices
             )
 
+            if (not np.all(np.isfinite(voltage_mag))
+                    or not np.all(np.isfinite(voltage_angle))
+                    or np.any(voltage_mag <= 0)):
+                raise RuntimeError("Invalid voltage state during Newton iteration")
             total_iterations += 1
 
         if not converged:
@@ -180,7 +212,8 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
                 "system_summary": system_summary,
                 "mismatch": mismatch,
                 "history": history,
-                "q_limit_events": q_limit_events
+                "q_limit_events": q_limit_events,
+                "effective_bus_types": {b.bus_id: b.bus_type for b in network.buses}
             }
 
         P_spec, Q_spec = calculate_specified_power(network)
@@ -195,5 +228,6 @@ def solve_newton_raphson(network, tolerance=1e-8, max_iterations=20):
         "Q_calc": Q_calc,
         "mismatch": mismatch,
         "history": history,
-        "q_limit_events": q_limit_events
+        "q_limit_events": q_limit_events,
+        "effective_bus_types": {b.bus_id: b.bus_type for b in network.buses}
     }
