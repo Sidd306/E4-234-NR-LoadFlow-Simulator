@@ -174,6 +174,7 @@ class Shunt:
 @dataclass
 class Network:
     base_mva: float = 100.0
+    frequency_hz: float = 50.0
 
     buses: list[Bus] = field(default_factory=list)
     generators: list[Generator] = field(default_factory=list)
@@ -209,6 +210,8 @@ class Network:
 
         if not math.isfinite(self.base_mva) or self.base_mva <= 0:
             raise ValueError("Base MVA must be finite and positive")
+        if not math.isfinite(self.frequency_hz) or self.frequency_hz <= 0:
+            raise ValueError("Frequency must be finite and positive")
         if not self.buses:
             raise ValueError("Network must contain at least one bus")
         ids = [b.bus_id for b in self.buses]

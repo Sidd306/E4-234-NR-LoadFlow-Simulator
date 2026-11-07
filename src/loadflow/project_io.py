@@ -20,7 +20,7 @@ def project_to_dict(network, positions=None, settings=None):
             return [float(v.x()), float(v.y())]
         return [float(v[0]), float(v[1])]
     return {"format": "E4234_LoadFlow_Project", "version": 1,
-            "base_mva": network.base_mva,
+            "base_mva": network.base_mva, "frequency_hz": network.frequency_hz,
             "elements": {key: [asdict(item) for item in getattr(network, key)]
                          for key in ELEMENTS},
             "layout": {str(k): xy(v) for k, v in positions.items()},
@@ -33,7 +33,8 @@ def project_from_dict(payload):
         raise ValueError("Unsupported project file or version")
     if not isinstance(payload.get("elements"), dict):
         raise ValueError("Missing project elements")
-    network = Network(base_mva=float(payload["base_mva"]))
+    network = Network(base_mva=float(payload["base_mva"]),
+                      frequency_hz=float(payload.get("frequency_hz", 50.0)))
     for name, cls in ELEMENTS.items():
         objects = payload["elements"].get(name, [])
         if not isinstance(objects, list):
