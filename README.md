@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # E4234 — Newton–Raphson Power System Load Flow Simulator
 
 Desktop single-line-diagram (SLD) application for AC power-flow studies. The computational engine uses NumPy and SciPy sparse operations; the GUI uses PySide6. The solver is implemented within the project: PYPOWER is used only for independent validation, not as the solve engine.
